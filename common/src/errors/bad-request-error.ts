@@ -12,3 +12,5 @@ export class BadRequestErroor extends CustomError {
         return [{ message: this.message }];
     }
 }
+
+export { BadRequestErroor as BadRequestError };

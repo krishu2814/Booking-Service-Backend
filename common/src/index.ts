@@ -7,3 +7,7 @@ export * from "./errors/not-found-error";
 export * from "./middlewares/auth.middleware";
 export * from "./middlewares/current-user.middleware";
 export * from "./middlewares/error-handler.middleware";
+export * from "./events/base-publisher";
+export * from "./events/base-subscriber";
+import OrderStatus from "./types/order-status";
+export { OrderStatus };
