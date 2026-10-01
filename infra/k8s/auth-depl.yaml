@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+    spec:
+      containers:
+        - name: auth
+          image: krishu2814/auth
+          env:
+            - name: MONGO_URI
+              value: mongodb://auth-mongo-cluster-srv:27017/auth
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-secret
+                  key: JWT_SECRET_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-cluster-srv
+spec:
+  selector:
+    app: auth
+  ports:
+    - name: auth-cluster-srv
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
