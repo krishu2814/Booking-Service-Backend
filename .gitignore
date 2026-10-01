@@ -22,3 +22,14 @@ Thumbs.db
 # Documentation PDFs (local only, do not commit)
 *.pdf
 Project-Architecture-and-Codebase-Analysis.pdf
+
+# Tests & test setups (local testing only, do not push to github)
+**/__test__/
+**/__tests__/
+**/test/
+**/tests/
+**/__mocks__/
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
