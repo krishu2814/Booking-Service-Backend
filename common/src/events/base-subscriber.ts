@@ -7,7 +7,8 @@ export abstract class Listener {
 
     abstract name: string;
     abstract durableName: string;
-    abstract onMessage(m: JsMsg): void;
+    abstract onMessage(m: JsMsg): void | Promise<void>;
+    private isListening = false;
 
     constructor(nc: NatsConnection) {
         this.nc = nc;
@@ -22,7 +23,8 @@ export abstract class Listener {
         try {
             return await this.jsm.consumers.info(this.name, this.durableName);
         } catch (e: any) {
-            if (e.code === "404") {
+            const isNotFound = e.code === "404" || e.code === 404 || e.api_error?.code === 404 || e.message?.toLowerCase().includes("not found");
+            if (isNotFound) {
                 return await this.jsm.consumers.add(this.name, {
                     deliver_policy: DeliverPolicy.All,
                     durable_name: this.durableName,
@@ -34,14 +36,18 @@ export abstract class Listener {
     }
 
     async listen(): Promise<void> {
-        await this.init();
-        const con = await this.createConsumer();
-        const c = await this.js.consumers.get(this.name, con.name);
-        const iter = await c.fetch();
+        if (this.isListening) {
+            return;
+        }
+        this.isListening = true;
         try {
+            await this.init();
+            const con = await this.createConsumer();
+            const c = await this.js.consumers.get(this.name, con.name);
+            const iter = await c.fetch({ expires: 5000 });
             for await (const m of iter) {
                 try {
-                    this.onMessage(m);
+                    await this.onMessage(m);
                     m.ack();
                 } catch (e) {
                     console.error("Error processing message:", e);
@@ -53,6 +59,8 @@ export abstract class Listener {
             } else {
                 console.error("Error in message fetch loop:", e);
             }
+        } finally {
+            this.isListening = false;
         }
     }
 }

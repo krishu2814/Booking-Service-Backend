@@ -21,12 +21,14 @@ export abstract class Publisher {
         try {
             return await this.jsm.streams.info(this.name);
         } catch (e: any) {
-            if (e.code === "404") {
+            const isNotFound = e.code === "404" || e.code === 404 || e.api_error?.code === 404 || e.message?.toLowerCase().includes("not found");
+            if (isNotFound) {
                 return await this.jsm.streams.add({
                     name: this.name,
                     subjects: this.subject
                 });
             }
+            throw e;
         }
     }
 

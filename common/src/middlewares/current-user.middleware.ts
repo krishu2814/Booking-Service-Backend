@@ -23,7 +23,7 @@ export async function currentUserMiddleware(req: Request, res: Response, next: N
         const payload = jwt.verify(token, process.env.JWT_SECRET_KEY!) as currentUser;
         req.currentUser = payload;
     } catch (err) {
-        console.error(err);
+        // Token is invalid or expired; req.currentUser remains undefined
     }
     next();
 }

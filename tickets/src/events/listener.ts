@@ -21,6 +21,7 @@ export class OrderListener extends Listener {
             }
         } catch (error) {
             console.error("Error processing order event in tickets service:", error);
+            throw error;
         }
     }
 
@@ -29,7 +30,7 @@ export class OrderListener extends Listener {
         if (!existingTicket) {
             throw new NotFoundError();
         }
-        existingTicket.set({ orderId: id });
+        existingTicket.set({ orderId: id, version: existingTicket.version + 1 });
         await existingTicket.save();
 
         const publisher = new TicketPublisher(natsWrapper.client);
@@ -49,7 +50,7 @@ export class OrderListener extends Listener {
         if (!existingTicket) {
             throw new NotFoundError();
         }
-        existingTicket.set({ orderId: undefined });
+        existingTicket.set({ orderId: undefined, version: existingTicket.version + 1 });
         await existingTicket.save();
 
         const publisher = new TicketPublisher(natsWrapper.client);
