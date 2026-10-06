@@ -1,6 +1,6 @@
 # Booking Service Backend (Microservices Architecture)
 
-A robust, production-grade, event-driven ticketing and booking platform built with **Node.js**, **Express**, **TypeScript**, **NATS JetStream**, **MongoDB**, **Redis**, **Docker**, and **Kubernetes**.
+A robust, production-grade, event-driven ticketing and booking platform built with **Node.js**, **Express**, **TypeScript**, **NATS JetStream**, **MongoDB**, **Redis**, **Stripe**, **Docker**, and **Kubernetes**.
 
 ---
 
@@ -26,6 +26,9 @@ flowchart TD
         ExpSrv["Expiration Service"]
         ExpRedis[("Expiration Redis\n(BullMQ)")]
 
+        PaySrv["Payments Service\n(:3000)"]
+        PayDB[("Payments MongoDB")]
+
         NATS{"NATS JetStream\n(Event Bus)"}
     end
 
@@ -33,15 +36,18 @@ flowchart TD
     Ingress -->|/api/users/*| AuthSrv
     Ingress -->|/api/tickets/*| TicketSrv
     Ingress -->|/api/orders/*| OrderSrv
+    Ingress -->|/api/payments/*| PaySrv
 
     AuthSrv <--> AuthDB
     TicketSrv <--> TicketDB
     OrderSrv <--> OrderDB
     ExpSrv <--> ExpRedis
+    PaySrv <--> PayDB
 
     TicketSrv <-->|Pub / Sub Events| NATS
     OrderSrv <-->|Pub / Sub Events| NATS
     ExpSrv <-->|Pub / Sub Events| NATS
+    PaySrv <-->|Pub / Sub Events| NATS
 ```
 
 ---
@@ -55,6 +61,7 @@ flowchart TD
 | **`tickets/`** | Node.js, Express, MongoDB | Ticket creation, editing, pricing, and locking via `orderId` association during active reservations. |
 | **`orders/`** | Node.js, Express, MongoDB | Central order orchestrator: reserves tickets, tracks status (`Created`, `Cancelled`, `AwaitingPayment`, `Completed`), and handles order cancellation. |
 | **`expiration/`** | Node.js, BullMQ, Redis | Asynchronous timer service: manages a 15-minute countdown queue for unpaid orders and emits expiration events. |
+| **`payments/`** | Node.js, Express, MongoDB, Stripe | Handles credit card transactions with Stripe, tracks payment records, and completes successful orders. |
 | **`infra/k8s/`** | Kubernetes, NGINX Ingress | Declarative deployments, cluster services, and ingress reverse proxy configurations. |
 
 ---
@@ -68,7 +75,7 @@ flowchart TD
      [ orders-service ]
             │
             ├──► Publishes `order.created` ──────► [ tickets-service ] (locks ticket by setting `orderId`)
-            │
+            ├──► Publishes `order.created` ──────► [ payments-service ] (replicates order projection in DB)
             └──► Publishes `order.created` ──────► [ expiration-service ] (enqueues 15-min delayed job in BullMQ)
                                                             │
                                                      (Timer expires)
@@ -76,8 +83,17 @@ flowchart TD
      [ orders-service ] ◄── Publishes `expiration.complete` ┘
             │
             ├── Updates order status to `Cancelled`
-            │
             └──► Publishes `order.cancelled` ────► [ tickets-service ] (unlocks ticket by clearing `orderId`)
+                                             ────► [ payments-service ] (marks replicated order as `Cancelled`)
+
+[ User completes Payment with Stripe ]
+            │
+            ▼
+     [ payments-service ]
+            │
+            ├── Charges credit card via Stripe API
+            ├── Saves Payment record in MongoDB
+            └──► Publishes `payment.created` ────► [ orders-service ] (marks order status as `Completed`)
 ```
 
 ### Event Subjects
@@ -113,6 +129,10 @@ flowchart TD
 - `GET /api/orders/:id` – Fetch details of a specific order [Protected]
 - `DELETE /api/orders/:id` – Cancel an existing order [Protected]
 
+### Payments (`/api/payments`)
+- `POST /api/payments` – Process payment for an active order via Stripe (`token`, `orderId`) [Protected]
+- `POST /api/payment/create` – Alias endpoint for payment creation [Protected]
+
 ---
 
 ## 🛠 Local Development & Testing
@@ -141,6 +161,9 @@ cd orders && npm test
 
 # Test expiration service
 cd expiration && npm test
+
+# Test payments service
+cd payments && npm test
 ```
 
 ### 3. Deploy to Kubernetes
@@ -153,6 +176,7 @@ Ensure your local hosts file (`/etc/hosts`) maps `127.0.0.1` to `ticketing.dev`:
 Create required secrets:
 ```bash
 kubectl create secret generic jwt-secret --from-literal=JWT_SECRET_KEY=your_secret_key
+kubectl create secret generic stripe-secret --from-literal=STRIPE_KEY=your_stripe_secret_key
 ```
 
 Apply all Kubernetes manifests:

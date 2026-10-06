@@ -31,3 +31,17 @@ spec:
                 name: orders-cluster-srv
                 port:
                   number: 3000
+          - path: /api/payments/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: payments-cluster-srv
+                port:
+                  number: 3000
+          - path: /api/payment/?(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: payments-cluster-srv
+                port:
+                  number: 3000
