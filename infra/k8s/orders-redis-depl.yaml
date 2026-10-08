@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-redis-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orders-redis
+  template:
+    metadata:
+      labels:
+        app: orders-redis
+    spec:
+      containers:
+        - name: orders-redis
+          image: redis:alpine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-redis-srv
+spec:
+  selector:
+    app: orders-redis
+  ports:
+    - name: redis-port
+      port: 6379
+      targetPort: 6379

@@ -4,6 +4,7 @@ import { Ticket } from "../models/ticket.model";
 import { Order } from "../models/order.model";
 import { OrderPublisher } from "./publishers";
 import { natsWrapper } from "./init";
+import { RedisLock } from "../services/redis-lock.service";
 
 export class TicketListener extends Listener {
     name = "tickets";
@@ -53,6 +54,11 @@ export class ExpirationListener extends Listener {
 
                 order.set({ status: OrderStatus.Cancelled, version: order.version + 1 });
                 await order.save();
+
+                // Release fast-path redis lock so the ticket can be re-reserved immediately
+                if (order.ticket) {
+                    await RedisLock.release(order.ticket.id);
+                }
 
                 const publisher = new OrderPublisher(natsWrapper.client);
                 await publisher.publish("order.cancelled", {

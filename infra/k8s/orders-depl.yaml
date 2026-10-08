@@ -25,6 +25,8 @@ spec:
                 secretKeyRef:
                   name: jwt-secret
                   key: JWT_SECRET_KEY
+            - name: REDIS_HOST
+              value: orders-redis-srv
 ---
 apiVersion: v1
 kind: Service

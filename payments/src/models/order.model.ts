@@ -52,6 +52,8 @@ const orderSchema = new Schema<OrderDoc, OrderModel>({
     }
 });
 
+orderSchema.index({ userId: 1 });
+
 orderSchema.statics.findByEvent = (event: { id: string; version: number }) => {
     return Order.findOne({
         _id: event.id,

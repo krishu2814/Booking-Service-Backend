@@ -3,6 +3,7 @@ import { app } from "./app";
 import { natsWrapper } from "./events/init";
 import { OrderPublisher } from "./events/publishers";
 import { TicketListener, ExpirationListener, PaymentListener } from "./events/listener";
+import { redisWrapper } from "./services/redis-lock.service";
 
 const start = async () => {
     if (!process.env.JWT_SECRET_KEY) {
@@ -16,16 +17,21 @@ const start = async () => {
     }
 
     try {
+        const redisHost = process.env.REDIS_HOST || "orders-redis-srv";
+        redisWrapper.connect(redisHost);
+
         await natsWrapper.connect(process.env.NATS_URL);
 
         process.on("SIGINT", () => {
-            console.log("SIGINT received, closing NATS connection");
+            console.log("SIGINT received, closing connections");
             natsWrapper.client.close();
+            redisWrapper.close();
             process.exit(0);
         });
         process.on("SIGTERM", () => {
-            console.log("SIGTERM received, closing NATS connection");
+            console.log("SIGTERM received, closing connections");
             natsWrapper.client.close();
+            redisWrapper.close();
             process.exit(0);
         });
 

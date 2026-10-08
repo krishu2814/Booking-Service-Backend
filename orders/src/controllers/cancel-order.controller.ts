@@ -4,6 +4,7 @@ import { validationResult } from "express-validator";
 import { Order } from "../models/order.model";
 import { OrderPublisher } from "../events/publishers";
 import { natsWrapper } from "../events/init";
+import { RedisLock } from "../services/redis-lock.service";
 
 export const cancelOrderController = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -26,6 +27,9 @@ export const cancelOrderController = async (req: Request, res: Response, next: N
             version: order.version + 1
         });
         await order.save();
+
+        // Release in-memory fast lock so ticket is immediately reservable again
+        await RedisLock.release(order.ticket.id);
 
         const publisher = new OrderPublisher(natsWrapper.client);
         await publisher.publish("order.cancelled", {

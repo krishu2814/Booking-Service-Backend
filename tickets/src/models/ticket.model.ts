@@ -51,6 +51,8 @@ const ticketSchema: Schema<TicketDoc, TicketModel> = new Schema({
     }
 });
 
+ticketSchema.index({ userId: 1 });
+
 ticketSchema.statics.build = (attrs: TicketAttrs) => {
     return new Ticket({
         ...attrs,

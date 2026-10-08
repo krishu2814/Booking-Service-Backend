@@ -59,6 +59,9 @@ const orderSchema = new Schema<OrderDoc, OrderModel>({
     }
 });
 
+orderSchema.index({ ticket: 1, status: 1 });
+orderSchema.index({ userId: 1 });
+
 orderSchema.statics.build = (attrs: OrderAttrs) => {
     return new Order({
         ...attrs,

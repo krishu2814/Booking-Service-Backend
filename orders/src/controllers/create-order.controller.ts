@@ -5,10 +5,12 @@ import { Ticket } from "../models/ticket.model";
 import { Order } from "../models/order.model";
 import { OrderPublisher } from "../events/publishers";
 import { natsWrapper } from "../events/init";
+import { RedisLock } from "../services/redis-lock.service";
 
 const EXPIRATION_WINDOW_SECONDS = 15 * 60;
 
 export const createOrderController = async (req: Request, res: Response, next: NextFunction) => {
+    let lockAcquired = false;
     try {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
@@ -16,6 +18,12 @@ export const createOrderController = async (req: Request, res: Response, next: N
         }
 
         const { ticketId } = req.body;
+
+        // 1. Fast-path in-memory atomic lock check (SET ticket:<id>:lock <userId> NX EX 900)
+        lockAcquired = await RedisLock.acquire(ticketId, req.currentUser!.id, EXPIRATION_WINDOW_SECONDS);
+        if (!lockAcquired) {
+            throw new BadRequestErroor("Ticket is already reserved");
+        }
 
         const ticket = await Ticket.findById(ticketId);
         if (!ticket) {
@@ -54,6 +62,9 @@ export const createOrderController = async (req: Request, res: Response, next: N
 
         res.status(201).send(order);
     } catch (error) {
+        if (lockAcquired && req.body?.ticketId) {
+            await RedisLock.release(req.body.ticketId, req.currentUser?.id);
+        }
         next(error);
     }
 };
