@@ -1,12 +1,36 @@
-# Booking Service Backend (Microservices Architecture)
+# Ticketing Microservices
 
-A robust, production-grade, event-driven ticketing and booking platform built with **Node.js**, **Express**, **TypeScript**, **NATS JetStream**, **MongoDB**, **Redis**, **Stripe**, **Docker**, and **Kubernetes**.
+This repository contains a production-grade, event-driven ticketing and booking microservices platform built using **Node.js**, **TypeScript**, **MongoDB**, **Redis**, **NATS JetStream**, **Stripe**, **Docker**, and **Kubernetes**. The application is designed to manage high-concurrency ticket sales, order reservations, secure payments, and user authentication in a scalable and fault-tolerant manner.
 
 ---
 
-## 🏛 Architecture Overview
+## Table of Contents
+- [Architecture](#architecture)
+- [Services](#services)
+- [Technologies](#technologies)
+- [Getting Started](#getting-started)
+- [Environment Variables](#environment-variables)
+- [Running the Application](#running-the-application)
+- [Testing](#testing)
+- [Deployment](#deployment)
+- [Contributing](#contributing)
 
-The system is designed following the **Database-per-Service** pattern, decoupling business domains into autonomous microservices that communicate asynchronously using **NATS JetStream** events.
+---
+
+## Architecture
+
+The system follows a **Database-per-Service** microservices architecture, decoupling business domains into autonomous services that communicate asynchronously through **NATS JetStream** events:
+
+- **Auth Service**: Handles user authentication, password hashing, and session management.
+- **Tickets Service**: Manages ticket creation, editing, pricing, and reservation locking.
+- **Orders Service**: Orchestrates ticket reservations with an atomic in-memory Redis lock.
+- **Expiration Service**: Manages a 15-minute countdown queue for unpaid orders using BullMQ.
+- **Payments Service**: Processes credit card transactions via Stripe and completes orders.
+- **Common Module**: Centralized shared package (`@ksticketinservice/common`) for error classes, middlewares, and event schemas.
+
+![Architecture Diagram](./architectures/HLD.png)
+
+### Architecture Topology
 
 ```mermaid
 flowchart TD
@@ -22,6 +46,7 @@ flowchart TD
         
         OrderSrv["Orders Service\n(:3000)"]
         OrderDB[("Orders MongoDB")]
+        OrderRedis[("Orders Redis\n(Fast-Path Lock)")]
 
         ExpSrv["Expiration Service"]
         ExpRedis[("Expiration Redis\n(BullMQ)")]
@@ -41,6 +66,7 @@ flowchart TD
     AuthSrv <--> AuthDB
     TicketSrv <--> TicketDB
     OrderSrv <--> OrderDB
+    OrderSrv <--> OrderRedis
     ExpSrv <--> ExpRedis
     PaySrv <--> PayDB
 
@@ -50,23 +76,7 @@ flowchart TD
     PaySrv <-->|Pub / Sub Events| NATS
 ```
 
----
-
-## 📦 Services Breakdown
-
-| Service | Technology | Primary Responsibilities |
-| :--- | :--- | :--- |
-| **`common/`** | TypeScript, npm | Shared internal package containing custom error classes, auth middlewares, NATS publisher/listener base classes, and domain types (`OrderStatus`). |
-| **`auth/`** | Node.js, Express, MongoDB | User signup, signin, signout, current user validation, password hashing (scrypt), and JWT cookie sessions. |
-| **`tickets/`** | Node.js, Express, MongoDB | Ticket creation, editing, pricing, and locking via `orderId` association during active reservations. |
-| **`orders/`** | Node.js, Express, MongoDB | Central order orchestrator: reserves tickets, tracks status (`Created`, `Cancelled`, `AwaitingPayment`, `Completed`), and handles order cancellation. |
-| **`expiration/`** | Node.js, BullMQ, Redis | Asynchronous timer service: manages a 15-minute countdown queue for unpaid orders and emits expiration events. |
-| **`payments/`** | Node.js, Express, MongoDB, Stripe | Handles credit card transactions with Stripe, tracks payment records, and completes successful orders. |
-| **`infra/k8s/`** | Kubernetes, NGINX Ingress | Declarative deployments, cluster services, and ingress reverse proxy configurations. |
-
----
-
-## 🔄 Event-Driven Booking Lifecycle
+### Event-Driven Booking Lifecycle
 
 ```
 [ User purchases Ticket ]
@@ -96,63 +106,205 @@ flowchart TD
             └──► Publishes `payment.created` ────► [ orders-service ] (marks order status as `Completed`)
 ```
 
-### Event Subjects
+---
 
-| Event Subject | Publishing Service | Consuming Services | Payload Summary |
-| :--- | :--- | :--- | :--- |
-| `ticket.created` | `tickets` | `orders` | `{ id, title, price, userId, version }` |
-| `ticket.updated` | `tickets` | `orders` | `{ id, title, price, userId, version, orderId? }` |
-| `order.created` | `orders` | `tickets`, `expiration`, `payments` | `{ id, version, userId, status, expiresAt, ticket: { id, price } }` |
-| `order.cancelled` | `orders` | `tickets`, `payments` | `{ id, version, ticket: { id } }` |
-| `expiration.complete` | `expiration` | `orders` | `{ orderId }` |
-| `payment.created` | `payments` | `orders` | `{ id, orderId, stripeId }` |
+## Services
+
+### Auth Service
+- **Path**: `/api/users/*`
+- **Description**: Manages user registration, login, session cookies, and authentication middleware.
+- **Details**:
+  - `POST /api/users/signup` – Register a new user with email and password.
+  - `POST /api/users/signin` – Authenticate user and receive signed JWT session cookie.
+  - `GET /api/users/currentuser` – Return profile data for the authenticated session.
+  - `POST /api/users/signout` – Clear the session cookie.
+  - Uses `scrypt` hashing with unique cryptographic salts for password security.
+  - Provides reusable authentication and authorization middlewares.
+
+![Auth Service Architecture](./architectures/Auth.png)
+
+### Tickets Service
+- **Path**: `/api/tickets/*`
+- **Description**: Handles ticket creation, retrieval, updates, and concurrency-safe locking.
+- **Details**:
+  - `POST /api/tickets` – Create a new ticket with title and price.
+  - `GET /api/tickets` – Retrieve all unreserved tickets.
+  - `GET /api/tickets/:id` – Fetch details of a specific ticket.
+  - `PUT /api/tickets/:id` – Edit title or price (only by ticket creator, when unlocked).
+  - Implements **Optimistic Concurrency Control (OCC)** using document versioning to prevent race conditions.
+  - Automatically locks tickets by assigning `orderId` upon receiving `order.created`, and unlocks them on `order.cancelled`.
+
+![Tickets Service Architecture](./architectures/Ticket.jpg)
+
+### Orders Service
+- **Path**: `/api/orders/*`
+- **Description**: Manages order creation, ticket reservation, and lifecycle status updates.
+- **Details**:
+  - `POST /api/orders` – Create an order reservation for a specific ticket.
+  - `GET /api/orders` – List all orders belonging to the authenticated user.
+  - `GET /api/orders/:id` – Fetch details of a specific order.
+  - `DELETE /api/orders/:id` – Cancel an existing order.
+  - **Redis Fast-Path Reservation Lock**: Uses atomic `SET ticket:<id>:lock <userId> NX EX 900` to reject contention in under 1 millisecond without touching MongoDB, scaling flash sales to **50,000+ req/s**.
+  - Emits `order.created` and `order.cancelled` events to coordinate across services.
+
+![Orders Service Architecture](./architectures/order.jpg)
+
+### Expiration Service
+- **Path**: Asynchronous Event Worker (NATS JetStream + Redis)
+- **Description**: Handles ticket reservation timeouts and automated expiration.
+- **Details**:
+  - Listens for `order.created` events and enqueues a delayed job in **BullMQ** on Redis.
+  - Automatically manages a 15-minute countdown window for unpaid orders.
+  - Emits `expiration.complete` event to the Orders service when the timer expires to cancel unpaid orders and release locked tickets.
+
+![Expiration Service Architecture](./architectures/Expiration.jpg)
+
+### Payment Service
+- **Path**: `/api/payments/*` and `/api/payment/*`
+- **Description**: Manages payment processing for ticket orders via Stripe.
+- **Details**:
+  - `POST /api/payments` and `POST /api/payment/create` – Process credit card transactions via Stripe API (`token`, `orderId`).
+  - Maintains order projections to ensure users can only pay for active, uncancelled orders they own.
+  - Prevents duplicate charges via idempotency checks against existing payment records.
+  - Emits `payment.created` event upon charge success to mark orders as `Completed`.
+
+![Payment Service Architecture](./architectures/Payment.jpg)
+
+### Common Module (`@ksticketinservice/common`)
+- **Path**: Shared npm package (`@ksticketinservice/common@^1.0.23`)
+- **Description**: Centralized library containing cross-service domain code.
+- **Details**:
+  - Standardized custom error classes (`BadRequestError`, `NotFoundError`, `NotAuthorizedError`, `RequestValidationError`).
+  - Shared authentication and request validation middlewares.
+  - Abstract base classes for NATS JetStream publishers and listeners.
+  - Shared domain definitions and `OrderStatus` enum.
 
 ---
 
-## 🚀 API Endpoints
+## Technologies
 
-### Authentication (`/api/users`)
-- `POST /api/users/signup` – Register a new account (`email`, `password`)
-- `POST /api/users/signin` – Authenticate user and receive JWT session cookie
-- `GET /api/users/currentuser` – Retrieve details of authenticated user
-- `POST /api/users/signout` – Clear session cookie
-
-### Tickets (`/api/tickets`)
-- `POST /api/tickets` – Create a new ticket (`title`, `price`) [Protected]
-- `GET /api/tickets` – List all unreserved tickets
-- `GET /api/tickets/:id` – Fetch a specific ticket by ID
-- `PUT /api/tickets/:id` – Update ticket title or price (only ticket creator, when unlocked) [Protected]
-
-### Orders (`/api/orders`)
-- `POST /api/orders` – Create an order reservation for a ticket (`ticketId`) [Protected]
-- `GET /api/orders` – List all orders belonging to the authenticated user [Protected]
-- `GET /api/orders/:id` – Fetch details of a specific order [Protected]
-- `DELETE /api/orders/:id` – Cancel an existing order [Protected]
-
-### Payments (`/api/payments`)
-- `POST /api/payments` – Process payment for an active order via Stripe (`token`, `orderId`) [Protected]
-- `POST /api/payment/create` – Alias endpoint for payment creation [Protected]
+- **Node.js**: JavaScript runtime for building scalable server-side microservices.
+- **TypeScript**: Typed superset of JavaScript ensuring compile-time safety across services.
+- **Express.js**: Fast, minimalist web framework for building REST APIs.
+- **MongoDB**: NoSQL document database with Mongoose ODM and compound indexing.
+- **Redis**: High-performance in-memory datastore for atomic reservation locks and BullMQ job queues.
+- **NATS JetStream**: Distributed event streaming platform for asynchronous pub/sub messaging.
+- **Stripe**: Payment processing gateway for secure credit card charges.
+- **Docker**: Containerization ensuring reproducible runtimes.
+- **Kubernetes**: Container orchestration for declarative deployments, cluster services, and ingress routing.
+- **Ingress-NGINX**: API gateway and reverse proxy routing external traffic to microservices.
+- **Skaffold**: Local development workflow facilitating live container synchronization.
 
 ---
 
-## 🛠 Local Development & Testing
+## Getting Started
 
 ### Prerequisites
-- [Node.js](https://nodejs.org/) (v18+)
+- [Node.js](https://nodejs.org/) (v18 or higher)
+- [MongoDB](https://www.mongodb.com/) (local or cloud instance)
 - [Docker](https://www.docker.com/) & [Kubernetes](https://kubernetes.io/) (Docker Desktop or Minikube)
 - [Ingress-NGINX Controller](https://kubernetes.github.io/ingress-nginx/)
 
-### 1. Build Shared Package
+### Installation
+1. Clone the repository:
 ```bash
-cd common
-npm install
-npm run build
+git clone https://github.com/krishu2814/Booking-Service-Backend.git
+cd Booking-Service-Backend
 ```
 
-### 2. Run Tests
-Each microservice has its own isolated Jest test suite:
+2. Install dependencies for each service:
+```bash
+cd auth && npm install
+cd ../tickets && npm install
+cd ../orders && npm install
+cd ../expiration && npm install
+cd ../payments && npm install
+cd ../common && npm install
+```
+
+---
+
+## Environment Variables
+
+Each service is configured via environment variables (mounted via Kubernetes ConfigMaps and Secrets in cluster mode, or defined locally):
+
+### Auth Service
+- `MONGO_URI`: MongoDB connection string (e.g., `mongodb://auth-mongo-srv:27017/auth`)
+- `JWT_KEY`: Secret key used for signing and verifying JWT session cookies (mounted from `jwt-secret`)
+- `PORT`: Port on which the service runs (default: `3000`)
+
+### Tickets Service
+- `MONGO_URI`: MongoDB connection string (`mongodb://tickets-mongo-srv:27017/tickets`)
+- `JWT_KEY`: Secret key for JWT verification (mounted from `jwt-secret`)
+- `NATS_CLUSTER_ID`: NATS cluster identifier (`ticketing`)
+- `NATS_CLIENT_ID`: Unique client ID for NATS connection
+- `NATS_URL`: NATS connection URL (`http://nats-srv:4222`)
+- `PORT`: Port on which the service runs (default: `3000`)
+
+### Orders Service
+- `MONGO_URI`: MongoDB connection string (`mongodb://orders-mongo-srv:27017/orders`)
+- `REDIS_HOST`: Host address for Redis Fast-Path lock (`orders-redis-srv`)
+- `REDIS_PORT`: Port for Redis instance (default: `6379`)
+- `JWT_KEY`: Secret key for JWT verification (mounted from `jwt-secret`)
+- `NATS_CLUSTER_ID`: NATS cluster identifier (`ticketing`)
+- `NATS_CLIENT_ID`: Unique client ID for NATS connection
+- `NATS_URL`: NATS connection URL (`http://nats-srv:4222`)
+- `PORT`: Port on which the service runs (default: `3000`)
+
+### Expiration Service
+- `REDIS_HOST`: Redis host for BullMQ countdown queue (`expiration-redis-srv`)
+- `REDIS_PORT`: Redis port (default: `6379`)
+- `NATS_CLUSTER_ID`: NATS cluster identifier (`ticketing`)
+- `NATS_CLIENT_ID`: Unique client ID for NATS connection
+- `NATS_URL`: NATS connection URL (`http://nats-srv:4222`)
+
+### Payment Service
+- `MONGO_URI`: MongoDB connection string (`mongodb://payments-mongo-srv:27017/payments`)
+- `JWT_KEY`: Secret key for JWT verification (mounted from `jwt-secret`)
+- `STRIPE_KEY`: Secret key for Stripe API payment charges (mounted from `stripe-secret`)
+- `NATS_CLUSTER_ID`: NATS cluster identifier (`ticketing`)
+- `NATS_CLIENT_ID`: Unique client ID for NATS connection
+- `NATS_URL`: NATS connection URL (`http://nats-srv:4222`)
+- `PORT`: Port on which the service runs (default: `3000`)
+
+---
+
+## Running the Application
+
+### 1. Live Development with Skaffold (Recommended)
+Make sure Kubernetes is active and configure the required cluster secrets:
 
 ```bash
+# Create required Kubernetes secrets
+kubectl create secret generic jwt-secret --from-literal=JWT_SECRET_KEY=your_secret_key
+kubectl create secret generic stripe-secret --from-literal=STRIPE_KEY=your_stripe_secret_key
+
+# Start all microservices with live file-sync
+skaffold dev
+```
+
+### 2. Manual Deployment to Kubernetes
+Map `ticketing.dev` in your local hosts file (`/etc/hosts`):
+```bash
+127.0.0.1 ticketing.dev
+```
+
+Apply all Kubernetes manifests:
+```bash
+kubectl apply -f infra/k8s/
+```
+
+---
+
+## Testing
+
+Each microservice has its own isolated Jest test suite with in-memory MongoDB servers (`mongodb-memory-server`):
+
+### Run Tests Individually:
+```bash
+# Test auth service
+cd auth && npm test
+
 # Test tickets service
 cd tickets && npm test
 
@@ -166,98 +318,33 @@ cd expiration && npm test
 cd payments && npm test
 ```
 
-### 3. Live Development with Skaffold
-You can run all microservices with live synchronization using [Skaffold](https://skaffold.dev/):
-
+### Run All Microservice Tests:
+Run all 60 tests across all 5 microservices in one command from the project root:
 ```bash
-# Ensure your secrets are created first
-kubectl create secret generic jwt-secret --from-literal=JWT_SECRET_KEY=your_secret_key
-kubectl create secret generic stripe-secret --from-literal=STRIPE_KEY=your_stripe_secret_key
-
-# Start all microservices with live file-sync
-skaffold dev
+npm --prefix auth test -- --watchAll=false && \
+npm --prefix tickets test -- --watchAll=false && \
+npm --prefix orders test -- --watchAll=false && \
+npm --prefix expiration test -- --watchAll=false && \
+npm --prefix payments test -- --watchAll=false
 ```
 
-### 4. Manual Deployment to Kubernetes
-Ensure your local hosts file (`/etc/hosts`) maps `127.0.0.1` to `ticketing.dev`:
-
-```bash
-127.0.0.1 ticketing.dev
-```
-
-Apply all Kubernetes manifests:
-```bash
-kubectl apply -f infra/k8s/
-```
-
----
-
-## 📮 Postman Collection & Automated API Testing
-
-A complete Postman test collection with automated variable extraction is provided in the [`postman/`](./postman) directory:
-
+### Automated API Testing (Postman)
+A complete Postman test suite is provided in the [`postman/`](./postman) directory:
 - **Collection**: [`postman/booking-service.postman_collection.json`](./postman/booking-service.postman_collection.json)
 - **Environment**: [`postman/booking-service.postman_environment.json`](./postman/booking-service.postman_environment.json)
 
-### Included Request Flows:
-1. **Authentication Flow**: User Signup, Signin, Current User verification, and Signout.
-2. **Tickets Flow**: Ticket creation, listing all tickets, fetching ticket by ID, updating ticket price/title.
-3. **Orders Flow**: Ticket reservation check, order creation, fetching user orders, order cancellation and ticket release.
-4. **Payments Flow**: Stripe charge processing with test token (`tok_visa`), payment verification, and order completion.
+---
+
+## Deployment
+
+For production deployment, Kubernetes is used to orchestrate and scale the microservices:
+1. Provision a managed Kubernetes cluster (EKS, GKE, or AKS).
+2. Install the **Ingress-NGINX** controller to manage external ingress traffic.
+3. Configure cloud secrets for `jwt-secret` and `stripe-secret`.
+4. Deploy the declarative manifests located in [`infra/k8s/`](./infra/k8s).
 
 ---
 
-## ⚡ Database Performance & Indexing
+## Contributing
 
-The data models utilize targeted indexes to optimize query latency under high traffic:
-- **Orders**:
-  - `orderSchema.index({ ticket: 1, status: 1 })` – Sub-millisecond reservation check (`isReserved`).
-  - `orderSchema.index({ userId: 1 })` – High-speed user order lookups.
-- **Tickets**:
-  - `ticketSchema.index({ userId: 1 })` – Fast user ticket queries.
-- **Payments**:
-  - `orderSchema.index({ userId: 1 })` – Fast order lookups during checkout authorization.
-
----
-
-## 🔒 Redis Fast-Path Reservation Lock (50,000+ req/s Flash Sales)
-
-During high-concurrency flash sales (e.g., stadium concert releases), thousands of users attempt to purchase the exact same ticket within milliseconds. Hitting disk-bound databases for concurrency control creates severe connection pool exhaustion and lock contention.
-
-To solve this, the **Orders service** implements an atomic in-memory reservation lock powered by Redis:
-
-```
-[ Incoming Order Request ]
-            │
-            ▼
-    [ Redis Fast-Path Check ] ── (SET ticket:<id>:lock <userId> NX EX 900)
-            │
-            ├────► [ Lock Failed ] ──► Returns 400 Immediately (< 1ms, No DB touch)
-            │
-            └────► [ Lock Acquired ]
-                        │
-                        ▼
-            [ Query Ticket & Verify DB ]
-                        │
-                        ▼
-            [ Create Order & Publish `order.created` ]
-```
-
-### Key Technical Characteristics:
-1. **Atomic In-Memory Locking**:
-   - Executes `SET ticket:<id>:lock <userId> NX EX 900`.
-   - Acquires lock and sets a 15-minute expiration (matching the order reservation window) in a single atomic Redis round-trip.
-2. **Sub-Millisecond Fast-Fail**:
-   - Competing requests for an already-reserved ticket are rejected immediately in memory without touching MongoDB.
-   - Shields the database from thundering herd issues, scaling ticket contention to **50,000+ req/s**.
-3. **Safe Atomic Lifecycle & Cleanup**:
-   - **Order Cancellation**: Released immediately via `cancelOrderController`.
-   - **Order Expiration**: Released automatically via `ExpirationListener` upon receiving `expiration.complete`.
-   - **Creation Failure**: Released conditionally using an atomic Lua script (`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end`) to prevent clearing another user's lock.
-4. **Resilient Fallback**:
-   - In the event of a Redis network partition, `RedisLock` gracefully falls back to MongoDB's compound-indexed `ticket.isReserved()` check, ensuring high availability.
-
----
-
-## 📄 License
-ISC License
+Contributions are welcome! Please open an issue or submit a pull request for any improvements or bug fixes.
