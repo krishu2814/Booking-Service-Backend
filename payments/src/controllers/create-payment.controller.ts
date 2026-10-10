@@ -1,5 +1,5 @@
 import {
-    BadRequestError,
+    BadRequestErroor as BadRequestError,
     NotAuthorizedError,
     NotFoundError,
     OrderStatus,
